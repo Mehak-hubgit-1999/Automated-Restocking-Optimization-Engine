@@ -24,22 +24,38 @@ Original file is located at
 # LPStrategy uses PuLP; if PuLP is not installed and LPStrategy is used,
 # an informative ImportError is raised.
 # """
-# 
+#%%writefile warehouse.py
+"""
+warehouse.py
+
+Core inventory engine for the Automated Restocking Optimization Engine.
+
+Classes:
+ - RestockStrategy (abstract)
+ - EOQStrategy, HeuristicStrategy, LPStrategy
+ - SupplierAgent
+ - InventoryItem
+ - Warehouse
+
+LPStrategy uses PuLP; if PuLP is not installed and LPStrategy is used,
+an informative ImportError is raised.
+"""
+
 # from abc import ABC, abstractmethod
 # import math
 # import random
 # import collections
 # from typing import Dict, Tuple
-# 
+
 # # plotting import kept here for optional helpers (main.py will call plotting)
 # import matplotlib.pyplot as plt
-# 
+
 # try:
 #     import pulp
 # except Exception:
 #     pulp = None
-# 
-# 
+
+
 # # ---------------------------
 # # Strategy Interface
 # # ---------------------------
@@ -50,8 +66,8 @@ Original file is located at
 #         Return a plan mapping sku -> requested_quantity (int).
 #         """
 #         pass
-# 
-# 
+
+
 # # ---------------------------
 # # EOQ Strategy
 # # ---------------------------
@@ -69,8 +85,8 @@ Original file is located at
 #             if item.stock <= reorder_point:
 #                 plan[sku] = q
 #         return plan
-# 
-# 
+
+
 # # ---------------------------
 # # Heuristic Strategy
 # # ---------------------------
@@ -78,7 +94,7 @@ Original file is located at
 #     def __init__(self, safety_factor: float = 0.3, weeks=2):
 #         self.safety_factor = safety_factor
 #         self.weeks = weeks  # order for `weeks` worth of demand
-# 
+
 #     def plan(self, warehouse, day):
 #         plan = {}
 #         for sku, item in warehouse.items.items():
@@ -86,8 +102,8 @@ Original file is located at
 #             if item.stock < int(item.daily_demand) + safety:
 #                 plan[sku] = int(round(item.daily_demand * 7 * self.weeks))
 #         return plan
-# 
-# 
+
+
 # # ---------------------------
 # # LP Strategy with shortage penalty (avoids trivial zero ordering)
 # # ---------------------------
@@ -103,11 +119,59 @@ Original file is located at
 #         self.shortage_penalty = float(shortage_penalty)
 #         self.planning_days = int(planning_days)
 #         self.budget = budget
-# 
+
 #     def plan(self, warehouse, day):
-# 
-# 
-# 
+#         # Candidates: all items (we let LP decide), but it's fine to restrict to low-stock ones
+#         SKUs = list(warehouse.items.keys())
+#         if not SKUs:
+#             return {}
+
+#         # Build LP
+#         prob = pulp.LpProblem("Restock_with_Shortage", pulp.LpMinimize)
+
+#         Q = {sku: pulp.LpVariable(f"Q_{sku}", lowBound=0, cat="Continuous") for sku in SKUs}
+#         S = {sku: pulp.LpVariable(f"S_{sku}", lowBound=0, cat="Continuous") for sku in SKUs}  # shortage variables
+
+#         # Objective: purchase cost + holding proxy + shortage penalty
+#         prob += pulp.lpSum(
+#             [
+#                 warehouse.items[sku].unit_cost * Q[sku]
+#                 + (warehouse.items[sku].holding_cost / 2.0) * Q[sku]
+#                 + self.shortage_penalty * S[sku]
+#                 for sku in SKUs
+#             ]
+#         )
+
+#         # Constraints: for each sku, ensure stock + Q - shortage >= demand_over_planning_horizon - incoming_arrivals_within_horizon
+#         for sku in SKUs:
+#             item = warehouse.items[sku]
+#             demand_horizon = item.daily_demand * self.planning_days
+#             # compute already scheduled incoming that will arrive within planning horizon
+#             incoming_within = sum(qty for (arr_day, qty) in warehouse.incoming.get(sku, []) if arr_day <= day + self.planning_days)
+#             # Current stock + orders - shortage + incoming >= demand_horizon
+#             prob += (item.stock + Q[sku] + incoming_within - S[sku]) >= demand_horizon
+
+#             # Supplier capacity constraint: can't order more than supplier max per order and warehouse capacity
+#             ub = min(item.supplier.max_supply_per_order, max(0, item.max_capacity - item.stock))
+#             prob += Q[sku] <= ub
+
+#         # Budget constraint optional
+#         if self.budget is not None:
+#             prob += pulp.lpSum([warehouse.items[sku].unit_cost * Q[sku] for sku in SKUs]) <= self.budget
+
+#         prob.solve(pulp.PULP_CBC_CMD(msg=False))
+
+#         plan = {}
+#         for sku in SKUs:
+#             qval = Q[sku].value()
+#             q_final = int(round(qval)) if qval is not None else 0
+#             # Avoid tiny fractional orders below supplier min by rounding up to min_order when appropriate
+#             if q_final > 0 and q_final < item.supplier.min_order_qty(item.supplier):
+#                 q_final = item.supplier.min_order_qty(item.supplier)
+#             plan[sku] = q_final
+#         return plan
+
+
 # # ---------------------------
 # # Supplier Agent
 # # ---------------------------
@@ -119,7 +183,7 @@ Original file is located at
 #         self.max_supply_per_order = int(max_supply_per_order)
 #         self.lead_time_range = (int(lead_time_range[0]), int(lead_time_range[1]))
 #         self.fill_rate = float(fill_rate)
-# 
+
 #     def place_order(self, sku: str, requested_qty: int, day: int) -> Tuple[int, int]:
 #         """
 #         Returns (accepted_qty, arrival_day) or (0, None) if rejected due to MOQ.
@@ -135,15 +199,15 @@ Original file is located at
 #         lt = random.randint(self.lead_time_range[0], self.lead_time_range[1])
 #         arrival = day + lt
 #         return accepted, arrival
-# 
+
 #     # helper to let strategies check supplier min order
 #     def min_order_qty(self, supplier_self=None):
 #         return self.min_order
-# 
+
 #     def expected_lead_time_mean(self) -> float:
 #         return (self.lead_time_range[0] + self.lead_time_range[1]) / 2.0
-# 
-# 
+
+
 # # ---------------------------
 # # Inventory Item
 # # ---------------------------
@@ -160,9 +224,9 @@ Original file is located at
 #         self.order_cost = float(order_cost)
 #         self.max_capacity = int(max_capacity)
 #         self.supplier = supplier
-# 
+
 #         self.daily_demand = self.annual_demand / 365.0
-# 
+
 #         # tracking
 #         self.stock_history = []
 #         self.demand_history = []
@@ -171,7 +235,7 @@ Original file is located at
 #         self.total_ordered = 0
 #         self.total_cost = 0.0
 #         self.lost_sales = 0
-# 
+
 #     def sell(self, qty: int) -> Tuple[int, int]:
 #         qty = int(qty)
 #         sold = min(self.stock, qty)
@@ -179,27 +243,27 @@ Original file is located at
 #         lost = qty - sold
 #         self.lost_sales += lost
 #         return sold, lost
-# 
+
 #     def receive(self, qty: int) -> int:
 #         qty = int(qty)
 #         accepted = min(qty, max(0, self.max_capacity - self.stock))
 #         self.stock += accepted
 #         return accepted
-# 
+
 #     def add_cost_for_order(self, qty: int):
 #         qty = int(qty)
 #         if qty <= 0:
 #             return
 #         self.total_cost += (self.order_cost + qty * self.unit_cost)
 #         self.total_ordered += qty
-# 
+
 #     def record_day(self, demand: int, requested: int):
 #         self.stock_history.append(self.stock)
 #         self.demand_history.append(int(demand))
 #         self.reorder_history.append(int(requested))
 #         self.cost_history.append(float(self.total_cost))
-# 
-# 
+
+
 # # ---------------------------
 # # Warehouse
 # # ---------------------------
@@ -208,10 +272,10 @@ Original file is located at
 #         self.strategy = strategy
 #         self.items: Dict[str, InventoryItem] = {}
 #         self.incoming: Dict[str, list] = collections.defaultdict(list)  # sku -> list of (arrival_day, qty)
-# 
+
 #     def register_item(self, item: InventoryItem):
 #         self.items[item.sku] = item
-# 
+
 #     def _receive_arrivals(self, day: int):
 #         for sku, queue in list(self.incoming.items()):
 #             while queue and queue[0][0] <= day:
@@ -219,7 +283,7 @@ Original file is located at
 #                 item = self.items.get(sku)
 #                 if item:
 #                     item.receive(qty)
-# 
+
 #     def _place_orders(self, plan: Dict[str, int], day: int):
 #         for sku, req in plan.items():
 #             if req <= 0:
@@ -232,14 +296,58 @@ Original file is located at
 #                 self.incoming[sku].append((arrival, accepted))
 #                 item.add_cost_for_order(accepted)
 #             # if accepted == 0, supplier rejected (MOQ); no cost added
-# 
+
 #     def simulate(self, days: int = 90, start_day: int = 1, seed: int = None):
-# 
-# 
+#         if seed is not None:
+#             random.seed(seed)
+#         for day in range(start_day, start_day + days):
+#             # 1) receive arrivals scheduled for today
+#             self._receive_arrivals(day)
+
+#             # 2) demand and sales
+#             day_demands = {}
+#             for item in self.items.values():
+#                 demand = random.randint(5, 15)  # stochastic demand
+#                 sold, lost = item.sell(demand)
+#                 day_demands[item.sku] = demand
+
+#             # 3) decide orders (strategy)
+#             plan = self.strategy.plan(self, day)
+
+#             # 4) place orders with suppliers
+#             self._place_orders(plan, day)
+
+#             # 5) record day stats
+#             for sku, item in self.items.items():
+#                 requested = plan.get(sku, 0)
+#                 item.record_day(demand=day_demands.get(sku, 0), requested=requested)
+
 #     def summary(self):
-# 
-# 
-# 
+#         rows = []
+#         for item in self.items.values():
+#             rows.append({
+#                 "sku": item.sku,
+#                 "name": item.name,
+#                 "stock": item.stock,
+#                 "total_ordered": item.total_ordered,
+#                 "total_cost": item.total_cost,
+#                 "lost_sales": item.lost_sales
+#             })
+#         return rows
+
+#     # optional plotting helpers
+#     def plot_stock(self, title=None):
+#         plt.figure(figsize=(10, 5))
+#         for item in self.items.values():
+#             plt.plot(item.stock_history, label=f"{item.name} ({item.sku})")
+#         plt.title(title or "Stock Levels")
+#         plt.xlabel("Day")
+#         plt.ylabel("Stock")
+#         plt.legend()
+#         plt.grid(True)
+#         plt.tight_layout()
+#         plt.show()
+
 #     def compute_service_level(self) -> float:
 #         # service level = 1 - (total lost sales / total demand)
 #         total_lost = sum(item.lost_sales for item in self.items.values())
@@ -247,4 +355,108 @@ Original file is located at
 #         if total_demand <= 0:
 #             return 1.0
 #         return 1.0 - (total_lost / total_demand)
-#
+# %%writefile main.py
+# """
+# main.py
+# Example runner that creates three warehouses (EOQ, LP, Heuristic),
+# simulates them over the same random seed, and plots & prints comparison.
+# """
+
+# from warehouse import (
+#     Warehouse, InventoryItem, SupplierAgent,
+#     EOQStrategy, HeuristicStrategy, LPStrategy
+# )
+# import matplotlib.pyplot as plt
+
+# def build_warehouse(strategy):
+#     wh = Warehouse(strategy)
+#     supplier_fast = SupplierAgent("FastSup", min_order=10, max_supply_per_order=500, lead_time_range=(1,3), fill_rate=0.98)
+#     supplier_slow = SupplierAgent("SlowSup", min_order=20, max_supply_per_order=300, lead_time_range=(4,7), fill_rate=0.9)
+
+#     wh.register_item(InventoryItem("S1", "Soap", 150, 1200, unit_cost=10, holding_cost=1.5, order_cost=20, max_capacity=1000, supplier=supplier_fast))
+#     wh.register_item(InventoryItem("S2", "Shampoo", 120, 1500, unit_cost=25, holding_cost=3.0, order_cost=40, max_capacity=800, supplier=supplier_fast))
+#     wh.register_item(InventoryItem("B1", "Biscuits", 200, 2000, unit_cost=5, holding_cost=0.8, order_cost=15, max_capacity=1500, supplier=supplier_slow))
+#     wh.register_item(InventoryItem("T1", "Toothpaste", 100, 1000, unit_cost=12, holding_cost=1.8, order_cost=30, max_capacity=700, supplier=supplier_fast))
+
+#     return wh
+
+# def run_all(seed=42, days=90):
+#     strategies = [
+#         (EOQStrategy(), "EOQ"),
+#         (LPStrategy(shortage_penalty=150.0, planning_days=30, budget=None), "LP"),
+#         (HeuristicStrategy(safety_factor=0.3, weeks=2), "Heuristic")
+#     ]
+
+#     results = []
+#     warehouses = []
+#     for strat, name in strategies:
+#         wh = build_warehouse(strat)
+#         wh.simulate(days=days, seed=seed)
+#         warehouses.append((wh, name))
+#         rows = wh.summary()
+#         service_level = wh.compute_service_level()
+#         results.append((name, rows, service_level))
+
+#     # Print summary
+#     for name, rows, service in results:
+#         print(f"\n===== {name} Strategy Results =====")
+#         for r in rows:
+#             print(f"{r['name']}: Stock={r['stock']}, TotalOrdered={r['total_ordered']}, Cost={r['total_cost']:.2f}, Lost={r['lost_sales']}")
+#         print(f"Service level: {service*100:.2f}%")
+
+#     # Plot stock time-series compare first item across strategies
+#     plt.figure(figsize=(12,6))
+#     for wh, name in warehouses:
+#         item = next(iter(wh.items.values()))  # first item
+#         plt.plot(item.stock_history, label=f"{name} - {item.name}")
+#     plt.xlabel("Day"); plt.ylabel("Stock"); plt.title("Stock of first product across strategies"); plt.legend(); plt.grid(); plt.show()
+
+#     # Plot total cost comparison
+#     names = []
+#     total_costs = []
+#     for wh, name in warehouses:
+#         names.append(name)
+#         total_costs.append(sum(item.total_cost for item in wh.items.values()))
+#     plt.figure(figsize=(8,4))
+#     plt.bar(names, total_costs)
+#     plt.ylabel("Total Cost"); plt.title("Total Cost by Strategy"); plt.show()
+
+# if __name__ == "__main__":
+#     run_all(seed=42, days=90)
+# %%writefile test.py
+# """
+# test_warehouse.py
+# Pytest tests for core behaviors.
+# """
+
+# import pytest
+# from warehouse import (
+#     Warehouse, InventoryItem, SupplierAgent,
+#     EOQStrategy, HeuristicStrategy, LPStrategy
+# )
+
+# def build_small_warehouse(strategy):
+#     wh = Warehouse(strategy)
+#     supplier = SupplierAgent("TestSup", min_order=5, max_supply_per_order=200, lead_time_range=(1,2), fill_rate=1.0)
+#     wh.register_item(InventoryItem("X1", "ItemX", 50, 365, unit_cost=10, holding_cost=1.0, order_cost=10, max_capacity=500, supplier=supplier))
+#     wh.register_item(InventoryItem("X2", "ItemY", 30, 365, unit_cost=5, holding_cost=0.5, order_cost=8, max_capacity=300, supplier=supplier))
+#     return wh
+
+# def test_no_negative_stock_eoq():
+#     wh = build_small_warehouse(EOQStrategy())
+#     wh.simulate(days=10, seed=1)
+#     for item in wh.items.values():
+#         assert all(s >= 0 for s in item.stock_history)
+
+# def test_lp_avoids_massive_stockouts():
+#     wh = build_small_warehouse(LPStrategy(shortage_penalty=200.0, planning_days=14))
+#     wh.simulate(days=14, seed=1)
+#     # service level should be reasonable (no more than 90% lost)
+#     service = wh.compute_service_level()
+#     assert service > 0.1  # >10% service (very weak but ensures not all demand lost)
+
+# def test_heuristic_orders_and_costs():
+#     wh = build_small_warehouse(HeuristicStrategy(safety_factor=0.2, weeks=1))
+#     wh.simulate(days=14, seed=1)
+#     # ensure costs recorded and orders placed at least once
+#     assert any(item.total_ordered > 0 or sum(item.reorder_history) > 0 for item in wh.items.values())
