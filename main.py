@@ -1,6 +1,7 @@
+%%writefile main.py
 """
 main.py
-A runner that creates three warehouses (EOQ, LP, Heuristic),
+Example runner that creates three warehouses (EOQ, LP, Heuristic),
 simulates them over the same random seed, and plots & prints comparison.
 """
 
@@ -46,12 +47,25 @@ def run_all(seed=42, days=90):
             print(f"{r['name']}: Stock={r['stock']}, TotalOrdered={r['total_ordered']}, Cost={r['total_cost']:.2f}, Lost={r['lost_sales']}")
         print(f"Service level: {service*100:.2f}%")
 
-    # Plot stock time-series compare first item across strategies
-    plt.figure(figsize=(12,6))
-    for wh, name in warehouses:
-        item = next(iter(wh.items.values()))  # first item
-        plt.plot(item.stock_history, label=f"{name} - {item.name}")
-    plt.xlabel("Day"); plt.ylabel("Stock"); plt.title("Stock of first product across strategies"); plt.legend(); plt.grid(); plt.show()
+    # Plot stock time-series for all items across strategies using subplots
+    fig, axes = plt.subplots(2, 2, figsize=(15, 10))
+    axes = axes.flatten() # Flatten the 2x2 array of axes for easy iteration
+
+    for i, sku in enumerate(warehouses[0][0].items.keys()): # Iterate through SKUs (assuming all warehouses have the same SKUs)
+        ax = axes[i]
+        for wh, name in warehouses:
+            item = wh.items[sku]
+            ax.plot(item.stock_history, label=f"{name}")
+        ax.set_title(f"Stock of {item.name} ({sku})")
+        ax.set_xlabel("Day")
+        ax.set_ylabel("Stock")
+        ax.legend()
+        ax.grid(True)
+
+    plt.tight_layout()
+    plt.suptitle("Stock Levels of All Items Across Strategies", y=1.02, fontsize=16)
+    plt.savefig('all_items_stock_across_strategies.png') # Save the figure
+    plt.show()
 
     # Plot total cost comparison
     names = []
@@ -62,6 +76,3 @@ def run_all(seed=42, days=90):
     plt.figure(figsize=(8,4))
     plt.bar(names, total_costs)
     plt.ylabel("Total Cost"); plt.title("Total Cost by Strategy"); plt.show()
-
-if __name__ == "__main__":
-    run_all(seed=42, days=90)
